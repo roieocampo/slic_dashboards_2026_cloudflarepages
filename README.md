@@ -104,3 +104,4 @@ python local_sync_agent.py
 - This package keeps the key inside Cloudflare Functions only.
 - Manual Admin upload works through browser chunk upload to avoid large payload errors.
 - Browser Excel parsing uses the SheetJS CDN. If your network blocks the CDN, use the local_sync_agent.py instead.
+  
