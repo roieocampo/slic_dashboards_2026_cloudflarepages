@@ -35,7 +35,18 @@ export async function onRequestPost(context) {
       started_at: startedAt,
       finished_at: new Date().toISOString(),
     }], 'return=minimal');
-    return json({ ok: true, counts, sync_id: syncId });
+
+    // A browser upload cannot reveal its true C:\\ or L:\\ source path. Pause
+    // local Auto Sync after a manual browser upload so an older configured file
+    // can never overwrite the freshly uploaded dashboard data. The admin can
+    // select the exact local source with local_sync_agent.py --configure and
+    // then re-enable Auto Sync.
+    await sbRequest(context.env, 'PATCH', 'slic_sync_settings?id=eq.1', {
+      enabled: false,
+      updated_at: new Date().toISOString(),
+    }, 'return=minimal');
+
+    return json({ ok: true, counts, sync_id: syncId, auto_sync_paused: true });
   } catch (err) {
     return json({ ok: false, error: err.message || String(err) }, 500);
   }
