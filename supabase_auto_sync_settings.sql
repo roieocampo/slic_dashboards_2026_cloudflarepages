@@ -1,5 +1,6 @@
--- Optional SQL upgrade for Admin Auto Sync Settings.
--- Run this once if you want to use the Local PC Auto Sync Agent settings page.
+-- Auto Sync settings for SLIC DashBoards.
+-- Exact Windows source paths are intentionally NOT hard-coded here.
+-- Choose them on the source PC with: python local_sync_agent.py --configure
 
 create table if not exists public.slic_sync_settings (
   id integer primary key default 1 check (id = 1),
@@ -13,15 +14,7 @@ create table if not exists public.slic_sync_settings (
 );
 
 insert into public.slic_sync_settings (id, enabled, schedule_type, daily_time, interval_minutes, ltx_path, ets_path)
-values (
-  1,
-  false,
-  'daily',
-  '00:00',
-  60,
-  'C:\Users\locampo3\OneDrive - Analog Devices, Inc\Ramilo, Kim Jonas''s files - SLIC_Sharepoint\LTX Sample weekly.xlsx',
-  'C:\Users\locampo3\OneDrive - Analog Devices, Inc\Ramilo, Kim Jonas''s files - SLIC_Sharepoint\SLIC_Activity_Monitoring.xlsm'
-)
+values (1, false, 'daily', '00:00', 60, null, null)
 on conflict (id) do nothing;
 
 alter table public.slic_sync_settings enable row level security;
