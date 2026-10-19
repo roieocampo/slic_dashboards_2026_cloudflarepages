@@ -24,7 +24,7 @@ export async function onRequestPost(context) {
     if(!isAdmin(session))return json({ok:false,error:'Admin Access required.'},403);
     const body=await context.request.json();
     const kind=String(body.kind||'').toLowerCase();
-    if(!['ltx','ets','export'].includes(kind))return json({ok:false,error:'Invalid picker type.'},400);
+    if(kind!=='export')return json({ok:false,error:'Invalid picker type.'},400);
     const settings=await fetchSettings(context.env);
     const age=Date.now()-new Date(settings.picker_updated_at||0).getTime();
     if(['running','pending'].includes(settings.picker_status)&&age>=0&&age<180000){
