@@ -11,7 +11,10 @@ export async function onRequestGet(context) {
     const headers = Array.isArray(meta.headers) ? meta.headers : [];
     const rowCount = Number(meta.row_count || 0);
     const rows = rowCount ? await fetchRows(context.env, sheet, Math.max(rowCount, 1)) : [];
-    const summary = buildSummary(headers, rows);
+    // Preserve original reconciliation. For CIP/Admin, browser computes exactly the
+    // same buildSummary on its fetched rows, outside Cloudflare's CPU limit.
+    // User Access stays summary-only: no row values are leaked to that role.
+    const summary = isCip(session) ? null : buildSummary(headers, rows);
     return json({
       ok: true,
       sheet,
