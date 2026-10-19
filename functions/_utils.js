@@ -171,10 +171,8 @@ export function defaultSettings() {
     schedule_type: 'daily',
     daily_time: '00:00',
     interval_minutes: 60,
-    // Exact source paths are intentionally NOT hard-coded. They are selected
-    // on the source PC with local_sync_agent.py --configure.
-    ltx_path: '',
-    ets_path: '',
+    ltx_path: "C:\\Users\\locampo3\\OneDrive - Analog Devices, Inc\\Ramilo, Kim Jonas's files - SLIC_Sharepoint\\LTX Sample weekly.xlsx",
+    ets_path: "C:\\Users\\locampo3\\OneDrive - Analog Devices, Inc\\Ramilo, Kim Jonas's files - SLIC_Sharepoint\\SLIC_Activity_Monitoring.xlsm",
     export_enabled: false,
     export_schedule_type: 'daily',
     export_daily_time: '00:00',
@@ -194,8 +192,7 @@ export async function fetchSettings(env) {
 }
 
 export async function saveSettings(env, payload) {
-  const current = await fetchSettings(env);
-  return sbUpsert(env, SETTINGS_TABLE, [{ ...defaultSettings(), ...current, ...payload, id: 1, updated_at: new Date().toISOString() }], 'id');
+  return sbUpsert(env, SETTINGS_TABLE, [{ ...defaultSettings(), ...payload, id: 1, updated_at: new Date().toISOString() }], 'id');
 }
 
 export async function fetchRows(env, sheetKey, maxRows = EXPORT_MAX_ROWS) {
@@ -203,6 +200,8 @@ export async function fetchRows(env, sheetKey, maxRows = EXPORT_MAX_ROWS) {
   let offset = 0;
   while (rows.length < maxRows) {
     const limit = Math.min(PAGE_SIZE, maxRows - rows.length);
+    // Dashboard/export only needs source_row and row_values. Keeping the payload small
+    // prevents Cloudflare Pages Functions from hitting ExceededCpu on large sheets.
     const endpoint = `${ROWS_TABLE}?select=${q('source_row,row_values')}&sheet_key=eq.${q(sheetKey)}&order=source_row.asc&limit=${limit}&offset=${offset}`;
     const batch = await sbRequest(env, 'GET', endpoint);
     if (!batch || !batch.length) break;
@@ -215,8 +214,8 @@ export async function fetchRows(env, sheetKey, maxRows = EXPORT_MAX_ROWS) {
 
 export function normText(value) {
   return String(value ?? '')
-    .replace(/[\u200B-\u200D\uFEFF]/g, '')
-    .replace(/\u00A0/g, ' ')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')     // zero-width/invisible characters
+    .replace(/\u00A0/g, ' ')                       // non-breaking spaces
     .replace(/[\r\n\t]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -259,80 +258,181 @@ export function searchVariants(value) {
 }
 
 export function smartMatch(value, keyword) {
-  const v = searchNorm(value);
+  keyword = normText(keyword);
   if (!keyword) return true;
-  return searchVariants(keyword).some((k) => v.includes(k));
+  const text = String(value ?? '');
+  if (text.toLowerCase().includes(keyword.toLowerCase())) return true;
+  const hay = searchNorm(text);
+  return searchVariants(keyword).some((v) => v && hay.includes(v));
 }
 
-export function uniqueHeaders(headers, maxCols = 10) {
-  const out = [];
-  const seen = {};
-  for (let i = 0; i < maxCols; i++) {
-    let base = normText(headers && headers[i]) || `Column ${String.fromCharCode(65 + i)}`;
-    if (seen[base]) {
-      seen[base] += 1;
-      base = `${base} (${seen[base]})`;
-    } else {
-      seen[base] = 1;
-    }
-    out.push(base);
-  }
-  return out;
-}
+const CANONICAL_ALIASES = {
+  'Completed': [
+    'Completed', 'Complete', 'Done', 'Pass', 'Passed',
+    'RB to SUV converted', 'RB to SUV convert', 'RB SUV converted', 'RB-SUV converted',
+    'SUV+HW Checker', 'SUV HW Checker', 'SUV and HW Checker', 'SUV & HW Checker',
+    'Already SUV Enrolled', 'Already SUV+HW Checker', 'Already SUV HW Checker',
+    'SLIC Converted', 'SUV Converted'
+  ],
+  'Failed': ['Failed', 'Fail', 'FAILED'],
+  'Ongoing': ['Ongoing', 'On going', 'On-going', 'In Progress', 'In-progress'],
+  'Insufficient Data': ['Insufficient Data', 'Insufficient', 'Not enough data'],
+  'Pending': ['Pending', 'Pend'],
+  'Done': ['Done', 'Completed', 'Complete'],
+  'RB to SUV converted': ['RB to SUV converted', 'RB to SUV convert', 'RB SUV converted', 'RB-SUV converted', 'RB to SUV Conversion'],
+  'SUV+HW checker': ['SUV+HW checker', 'SUV+HW Checker', 'SUV HW Checker', 'SUV and HW Checker', 'SUV & HW Checker'],
+  'Already approved in Local': ['Already approved in Local', 'Already approve in Local', 'Approved in Local', 'Already Local Approved'],
+  'For approval in Local': ['For approval in Local', 'For approve in Local', 'For Local Approval', 'Local for Approval'],
+  'For TRS': ['For TRS', 'For TRS Update', 'Need TRS', 'TRS Needed'],
+  'No SUV yet': ['No SUV yet', 'No SUV', 'No SUV available'],
+  'For Approval': ['For Approval', 'For approval', 'Pending Approval'],
+  'SLIC Converted': ['SLIC Converted', 'SLIC convert', 'SLIC conversion'],
+  'SUV Converted': ['SUV Converted', 'SUV convert', 'SUV conversion'],
+  'SUV+HW Checker': ['SUV+HW Checker', 'SUV HW Checker', 'SUV and HW Checker', 'SUV & HW Checker'],
+  'No SUV': ['No SUV', 'No SUV yet', 'No SUV available'],
+  'Onqueue': ['Onqueue', 'On queue', 'On-queue', 'On Queue']
+};
 
 function compactStatus(value) {
-  return normText(value).toLowerCase().replace(/[^a-z0-9]+/g, '');
+  return searchNorm(value);
 }
 
-function partKeyFromValue(value, row) {
-  const p = searchNorm(normText(value));
-  if (p) return p;
-  return `__row_${row?.source_row ?? ''}`;
+function statusLooksLike(value, alias) {
+  const v = compactStatus(value);
+  const a = compactStatus(alias);
+  if (!v || !a) return false;
+  if (v === a) return true;
+  if (v.includes(a) || a.includes(v)) return true;
+
+  // Pattern-based correction for common punctuation/spacing/wording differences.
+  if (a.includes('rbtosuv') && v.includes('rb') && v.includes('suv') && (v.includes('convert') || v.includes('conversion'))) return true;
+  if (a.includes('suvhwchecker') && v.includes('suv') && v.includes('hw') && v.includes('checker')) return true;
+  if (a.includes('slicconverted') && v.includes('slic') && (v.includes('convert') || v.includes('conversion'))) return true;
+  if (a.includes('suvconverted') && !v.includes('rbtosuv') && v.includes('suv') && (v.includes('convert') || v.includes('conversion'))) return true;
+  if (a.includes('alreadyapprovedinlocal') && v.includes('already') && v.includes('approved') && v.includes('local')) return true;
+  if (a.includes('forapprovalinlocal') && v.includes('approval') && v.includes('local') && (v.includes('for') || v.includes('pending'))) return true;
+  if (a.includes('insufficientdata') && v.includes('insufficient') && v.includes('data')) return true;
+  if (a.includes('nosuvyet') && v.includes('no') && v.includes('suv')) return true;
+  if (a.includes('fortrs') && v.includes('trs') && (v.includes('for') || v.includes('need'))) return true;
+  if (a === 'ongoing' && (v.includes('ongoing') || v.includes('ongoing') || v.includes('inprogress'))) return true;
+  if (a === 'pending' && v.includes('pending')) return true;
+  if (a === 'failed' && v.includes('fail')) return true;
+  if (a === 'completed' && (v.includes('completed') || v.includes('complete') || v.includes('done') || v.includes('passed'))) return true;
+  return false;
+}
+
+function aliasesForCategory(category) {
+  const aliases = new Set([category]);
+  const list = CANONICAL_ALIASES[category] || [];
+  for (const a of list) aliases.add(a);
+  return [...aliases];
+}
+
+function categoryMatch(value, category) {
+  value = normText(value);
+  category = normText(category);
+  if (!value || !category) return false;
+  return aliasesForCategory(category).some((alias) => statusLooksLike(value, alias));
+}
+
+function canonicalKnownLabel(value, categories = []) {
+  const ordered = [...categories, 'Completed', 'Failed', 'Ongoing', 'Insufficient Data', 'Pending', 'Done', 'RB to SUV converted', 'SUV+HW checker', 'Already approved in Local', 'For approval in Local', 'For TRS', 'No SUV yet', 'For Approval', 'SLIC Converted', 'SUV Converted', 'SUV+HW Checker', 'No SUV', 'Onqueue'];
+  const seen = new Set();
+  for (const cat of ordered) {
+    if (!cat || seen.has(cat)) continue;
+    seen.add(cat);
+    if (categoryMatch(value, cat)) return cat;
+  }
+  return normText(value);
+}
+
+function isCompletedFinalStatus(value) {
+  return categoryMatch(value, 'Completed');
+}
+
+function partKeyFromValue(partValue, row) {
+  const v = normText(partValue);
+  return v ? searchNorm(v) : `__row_${row.source_row || ''}`;
+}
+
+function partKey(row, idx) {
+  return partKeyFromValue(rowCell(row, idx), row);
 }
 
 function rowCountKey(row) {
+  // Use the Excel/source row as the primary counting key. This prevents two
+  // different Excel rows from being accidentally merged just because their
+  // partnames become equal after removing spaces/punctuation/invisible chars.
   return `__source_row_${row?.source_row ?? ''}`;
 }
 
 function addDynamicOtherByPart(dynamicOthers, rawValue, pk) {
   const display = normText(rawValue);
   if (!display) return;
-  let entry = dynamicOthers.get(compactStatus(display));
-  if (!entry) {
-    entry = { label: display, parts: new Set() };
-    dynamicOthers.set(compactStatus(display), entry);
-  }
-  entry.parts.add(pk);
+  const key = compactStatus(display) || display.toLowerCase();
+  if (!dynamicOthers.has(key)) dynamicOthers.set(key, { label: display, parts: new Set() });
+  dynamicOthers.get(key).parts.add(pk);
 }
 
-function fastCategoryMatchCompact(v, category) {
-  if (!v) return false;
-  const c = compactStatus(category);
-  if (v === c) return true;
-
-  if (c === 'completed') {
-    return v === 'complete' || v === 'completed' || v === 'done' || v === 'closed' || v === 'finished' ||
-      v.includes('complete') || v.includes('slicconverted') || v.includes('suvconverted') ||
-      v.includes('suvhwchecker') || v.includes('rbtosuvconverted') ||
-      v.includes('alreadysuvenrolled') || v.includes('alreadysuvhwchecker');
+function setsToCounts(countSets, dynamicOthers = null) {
+  const out = {};
+  for (const [label, set] of Object.entries(countSets)) out[label] = set.size;
+  if (dynamicOthers) {
+    for (const { label, parts } of [...dynamicOthers.values()].sort((a, b) => a.label.localeCompare(b.label))) {
+      if (!out[label]) out[label] = parts.size;
+      else out[label] += parts.size;
+    }
   }
-  if (c === 'failed') return v === 'failed' || v === 'fail' || v.includes('failed') || v.includes('failure');
-  if (c === 'ongoing') return v === 'ongoing' || v === 'inprogress' || v.includes('ongoing') || v.includes('inprogress');
-  if (c === 'insufficientdata') return v.includes('insufficientdata') || v === 'insufficient';
-  if (c === 'pending') return v.includes('pending');
-  if (c === 'slicconverted') return v.includes('slicconverted');
-  if (c === 'suvconverted') return v.includes('suvconverted') && !v.includes('rbtosuvconverted');
-  if (c === 'suvhwchecker') return v.includes('suvhwchecker');
-  if (c === 'rbtosuvconverted') return v.includes('rbtosuvconverted');
-  if (c === 'alreadyapprovedinlocal') return v.includes('alreadyapprovedinlocal');
-  if (c === 'forapprovalinlocal') return v.includes('forapprovalinlocal');
-  if (c === 'done') return v === 'done' || v === 'completed' || v === 'complete';
-  if (c === 'fortrs') return v.includes('fortrs');
-  if (c === 'nosuvyet') return v.includes('nosuvyet');
-  if (c === 'forapproval') return v.includes('forapproval');
-  if (c === 'nosuv') return v === 'nosuv' || v.includes('nosuv');
-  if (c === 'onqueue') return v === 'onqueue' || v.includes('onqueue');
-  return v === c;
+  return out;
+}
+
+const CATEGORY_ALIAS_COMPACTS = (() => {
+  const out = {};
+  const labels = new Set(Object.keys(CANONICAL_ALIASES));
+  for (const [cat, aliases] of Object.entries(CANONICAL_ALIASES)) {
+    labels.add(cat);
+    for (const a of aliases || []) labels.add(a);
+  }
+  for (const label of labels) {
+    const aliases = new Set([compactStatus(label)]);
+    for (const a of CANONICAL_ALIASES[label] || []) aliases.add(compactStatus(a));
+    out[label] = [...aliases].filter(Boolean);
+  }
+  return out;
+})();
+
+function statusLooksLikeCompact(v, aliasCompact) {
+  const a = aliasCompact;
+  if (!v || !a) return false;
+  if (v === a) return true;
+  if (v.includes(a) || a.includes(v)) return true;
+
+  // Fast pattern-based correction for common punctuation/spacing/wording differences.
+  if (a.includes('rbtosuv') && v.includes('rb') && v.includes('suv') && (v.includes('convert') || v.includes('conversion'))) return true;
+  if (a.includes('suvhwchecker') && v.includes('suv') && v.includes('hw') && v.includes('checker')) return true;
+  if (a.includes('slicconverted') && v.includes('slic') && (v.includes('convert') || v.includes('conversion'))) return true;
+  if (a.includes('suvconverted') && !v.includes('rbtosuv') && v.includes('suv') && (v.includes('convert') || v.includes('conversion'))) return true;
+  if (a.includes('alreadysuvenrolled') && v.includes('already') && v.includes('suv') && v.includes('enroll')) return true;
+  if (a.includes('alreadysuvhwchecker') && v.includes('already') && v.includes('suv') && v.includes('hw') && v.includes('checker')) return true;
+  if (a.includes('alreadyapprovedinlocal') && v.includes('already') && v.includes('approved') && v.includes('local')) return true;
+  if (a.includes('forapprovalinlocal') && v.includes('approval') && v.includes('local') && (v.includes('for') || v.includes('pending'))) return true;
+  if (a.includes('insufficientdata') && v.includes('insufficient') && v.includes('data')) return true;
+  if ((a.includes('nosuvyet') || a === 'nosuv') && v.includes('no') && v.includes('suv')) return true;
+  if (a.includes('fortrs') && v.includes('trs') && (v.includes('for') || v.includes('need'))) return true;
+  if (a === 'ongoing' && (v.includes('ongoing') || v.includes('inprogress'))) return true;
+  if (a === 'pending' && v.includes('pending')) return true;
+  if (a === 'failed' && v.includes('fail')) return true;
+  if (a === 'completed' && (v.includes('completed') || v.includes('complete') || v.includes('done') || v.includes('passed'))) return true;
+  if (a === 'done' && (v.includes('done') || v.includes('complete'))) return true;
+  if (a === 'forapproval' && v.includes('approval') && (v.includes('for') || v.includes('pending'))) return true;
+  if (a === 'onqueue' && (v.includes('onqueue') || (v.includes('on') && v.includes('queue')))) return true;
+  return false;
+}
+
+function fastCategoryMatchCompact(compactValue, category) {
+  const aliases = CATEGORY_ALIAS_COMPACTS[category] || [compactStatus(category)];
+  for (const a of aliases) if (statusLooksLikeCompact(compactValue, a)) return true;
+  return false;
 }
 
 function matchedCategory(compactValue, categories) {
@@ -367,30 +467,23 @@ function valueCounts(rows, idx, partIdx = null) {
   for (const row of rows) {
     const v = rowCell(row, idx);
     if (!v) continue;
-    const pk = partIdx == null ? String(row.source_row ?? '') : partKeyFromValue(rowCell(row, partIdx), row);
-    const key = compactStatus(v);
-    let e = map.get(key);
-    if (!e) { e = { label: normText(v), parts: new Set() }; map.set(key, e); }
-    e.parts.add(pk);
+    if (partIdx === null || partIdx === undefined || partIdx < 0) map.set(v, (map.get(v) || 0) + 1);
+    else {
+      if (!map.has(v)) map.set(v, new Set());
+      map.get(v).add(partKey(row, partIdx));
+    }
   }
-  return Object.fromEntries([...map.values()].map((e) => [e.label, e.parts.size]));
+  return Object.fromEntries([...map.entries()].map(([k, v]) => [k, v instanceof Set ? v.size : v]));
 }
 
-function setsToCounts(sets, dynamicOthers) {
-  const out = {};
-  for (const [k, v] of Object.entries(sets)) out[k] = v.size;
-  for (const e of dynamicOthers.values()) out[e.label] = e.parts.size;
-  return out;
-}
-
-export function buildSummary(rows, headers) {
-  const partIdx = headerIndex(headers, ['Partname', 'Part Name', 'Part Names', 'Device', 'Device Name']);
+export function buildSummary(headers, rows) {
+  const partIdx = headerIndex(headers, ['Partname', 'Partnames', 'Part Name', 'Device', 'Part Number']);
   const enrollIdx = headerIndex(headers, ['Enrollment Status', 'Enrolled in Cloud']);
   const remarksIdx = headerIndex(headers, ['Cloud Enrollment Remarks', 'Remarks']);
   const trsIdx = headerIndex(headers, ['TRS Updates', 'TRS Update']);
   const peIdx = headerIndex(headers, ['PE Updates', 'Status']);
-  const finalIdx = headerIndex(headers, ['Final Remarks / Status', 'Final Remarks', 'Final Status']);
-  const weekIdx = headerIndex(headers, ['Week Completion', 'TRS Completion week', 'Completion Week']);
+  const finalIdx = headerIndex(headers, ['Final Remarks / Status', 'Final Status']);
+  const weekIdx = headerIndex(headers, ['Week Completion', 'TRS Completion week', 'Completion week']);
 
   const peCats = ['Completed', 'Failed', 'Ongoing', 'Insufficient Data', 'Pending'];
   const enrollCats = ['Done', 'Ongoing', 'Failed', 'RB to SUV converted', 'SUV+HW checker'];
@@ -406,7 +499,7 @@ export function buildSummary(rows, headers) {
 
   for (const row of rows) {
     const partValue = rowCell(row, partIdx);
-    if (!partValue) continue;
+    if (!partValue) continue; // Ignore only true blank Excel data rows without Partname.
 
     const rk = rowCountKey(row);
     validRowSet.add(rk);
@@ -419,6 +512,8 @@ export function buildSummary(rows, headers) {
     const trs = rowCell(row, trsIdx);
     const week = rowCell(row, weekIdx);
 
+    // One Excel/source row must be counted only once per summary box.
+    // This prevents totals from becoming higher/lower than Partnames Counts.
     addSingleCategory(peSets, peOthers, pe, peCats, rk, { countBlank: true, blankLabel: 'Blank PE Updates' });
     addSingleCategory(enrollSets, enrollOthers, enroll, enrollCats, rk, { countBlank: true, blankLabel: 'Blank Enrollment Status' });
     addSingleCategory(remarksSets, remarksOthers, rem, remarksCats, rk, { countBlank: true, blankLabel: 'Blank Cloud Enrollment Remarks' });
@@ -440,6 +535,9 @@ export function buildSummary(rows, headers) {
 
   return {
     indexes: { partIdx, enrollIdx, remarksIdx, trsIdx, peIdx, finalIdx, weekIdx },
+    // Count source Excel rows with a valid nonblank Partname. This is the
+    // dashboard reconciliation total. unique_partnames_count is still returned
+    // for debugging/future display, but the visible Partnames Counts uses this.
     partnames_count: validRowSet.size,
     unique_partnames_count: uniquePartSet.size,
     pe_counts: peCounts,
@@ -460,4 +558,66 @@ export function buildSummary(rows, headers) {
   };
 }
 
-export { ROWS_TABLE, META_TABLE, LOG_TABLE, SETTINGS_TABLE, PAGE_SIZE, EXPORT_MAX_ROWS };
+export function displayHeader(sourceCol, rawHeader) {
+  const forced = {
+    1: 'Partname',
+    13: 'Enrollment Status',
+    14: 'Cloud Enrollment Remarks',
+    15: 'TRS Updates',
+    16: 'PE Updates',
+    18: 'Final Remarks / Status',
+    19: 'Week Completion',
+  };
+  return forced[sourceCol] || normText(rawHeader) || `Column ${String.fromCharCode(64 + sourceCol)}`;
+}
+
+export function uniqueHeaders(rawHeaders, maxCols = 10) {
+  const headers = [];
+  const seen = {};
+  for (let i = 0; i < Math.min(rawHeaders.length, maxCols); i++) {
+    let base = normText(rawHeaders[i]) || `Column ${String.fromCharCode(65 + i)}`;
+    if (seen[base]) { seen[base] += 1; base = `${base} (${seen[base]})`; }
+    else seen[base] = 1;
+    headers.push(base);
+  }
+  while (headers.length < maxCols) headers.push(`Column ${String.fromCharCode(65 + headers.length)}`);
+  return headers;
+}
+
+export async function sha256Hex(value) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+export async function buildRowsFromClient(sheetKey, syncId, sheetName, headers, clientRows) {
+  const peIdx = headerIndex(headers, ['PE Updates', 'Status']);
+  const finalIdx = headerIndex(headers, ['Final Remarks / Status', 'Final Status']);
+  const stamp = new Date().toISOString();
+  const out = [];
+  for (const item of clientRows || []) {
+    const sourceRow = Number(item.source_row || 0);
+    if (!sourceRow) continue;
+    const values = (item.row_values || []).slice(0, 10);
+    while (values.length < 10) values.push('');
+    if (values.every((v) => !normText(v))) continue;
+    const data = {};
+    for (let i = 0; i < 10; i++) data[headers[i] || `Column ${String.fromCharCode(65 + i)}`] = values[i] ?? '';
+    const pe = values[peIdx] || '';
+    const fin = values[finalIdx] || '';
+    out.push({
+      sheet_key: sheetKey,
+      sheet_name: sheetName,
+      source_row: sourceRow,
+      row_values: values,
+      data,
+      row_hash: await sha256Hex(JSON.stringify(values)),
+      status_value: String(pe || '').trim(),
+      completed_flag: categoryMatch(pe, 'Completed') || isCompletedFinalStatus(fin),
+      sync_id: syncId,
+      synced_at: stamp,
+    });
+  }
+  return out;
+}
+
+export { ROWS_TABLE, META_TABLE, LOG_TABLE, SETTINGS_TABLE };
