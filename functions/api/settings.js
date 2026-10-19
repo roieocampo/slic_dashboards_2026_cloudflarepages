@@ -20,6 +20,14 @@ export async function onRequestPost(context) {
       return Number.isFinite(n) ? Math.max(1, Math.min(10080, n)) : fallback;
     };
     if (scope === 'auto') {
+      if (body.enabled) {
+        const current = await fetchSettings(context.env);
+        for (const key of ['ltx','ets']) {
+          if (current[key+'_expected_name'] && current[key+'_source_status'] !== 'verified') {
+            return json({ok:false,error:key.toUpperCase()+' uploaded workbook is not yet verified by the local agent. Do not enable Auto Sync with an old file.'},409);
+          }
+        }
+      }
       payload.enabled = !!body.enabled;
       payload.schedule_type = body.schedule_type === 'interval' ? 'interval' : 'daily';
       payload.daily_time = String(body.daily_time || '00:00').slice(0, 5);
