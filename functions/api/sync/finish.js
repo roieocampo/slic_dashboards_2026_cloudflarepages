@@ -36,17 +36,32 @@ export async function onRequestPost(context) {
       finished_at: new Date().toISOString(),
     }], 'return=minimal');
 
-    // A browser upload cannot reveal its true C:\\ or L:\\ source path. Pause
-    // local Auto Sync after a manual browser upload so an older configured file
-    // can never overwrite the freshly uploaded dashboard data. The admin can
-    // select the exact local source with local_sync_agent.py --configure and
-    // then re-enable Auto Sync.
-    await sbRequest(context.env, 'PATCH', 'slic_sync_settings?id=eq.1', {
+    // Keep the exact uploaded source identity. An HTML file input hides its
+    // real Windows path, so the local agent must verify SHA-256 before binding.
+    const refs = body.source_refs && typeof body.source_refs === 'object' ? body.source_refs : {};
+    const previousRows = await sbRequest(context.env, 'GET',
+      'slic_sync_settings?id=eq.1&select=enabled,auto_resume_on_bind&limit=1');
+    const previous = (previousRows && previousRows[0]) || {};
+    const patch = {
       enabled: false,
+      auto_resume_on_bind: !!previous.enabled || !!previous.auto_resume_on_bind,
       updated_at: new Date().toISOString(),
-    }, 'return=minimal');
-
-    return json({ ok: true, counts, sync_id: syncId, auto_sync_paused: true });
+    };
+    for (const sh of sheets) {
+      const key=String(sh.sheet_key||'').toUpperCase();
+      if (!['LTX','ETS'].includes(key))continue;
+      const file=refs[key]||{};
+      const name=String(file.name||'').split(/[\\/]/).pop().slice(0,255);
+      const sha=String(file.sha256||'').toLowerCase();
+      if (!name || !/^[a-f0-9]{64}$/.test(sha))continue;
+      const prefix=key.toLowerCase();
+      patch[prefix+'_expected_name']=name;
+      patch[prefix+'_expected_sha256']=sha;
+      patch[prefix+'_source_status']='pending';
+      patch[prefix+'_source_message']='Local agent verification pending for '+name;
+    }
+    await sbRequest(context.env,'PATCH','slic_sync_settings?id=eq.1',patch,'return=minimal');
+    return json({ ok: true, counts, sync_id: syncId, auto_sync_paused: true, source_binding_pending: true });
   } catch (err) {
     return json({ ok: false, error: err.message || String(err) }, 500);
   }
